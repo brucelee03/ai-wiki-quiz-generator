@@ -1,40 +1,113 @@
-from database import SessionLocal, Quiz
-from scraper import scrape_wikipedia
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.orm import Session
 from datetime import datetime
 import json
 
-def test_scrape_and_store(url: str):
-    # Step 1: Scrape Wikipedia
-    print(f"🔍 Scraping article: {url}")
-    title, text = scrape_wikipedia(url)
-    print(f"✅ Scraped Title: {title[:50]}...")
+from backend.database import SessionLocal, engine
+from backend import models
+from backend.scraper import scrape_wikipedia
+from backend.llm_quiz_generator import generate_quiz
 
-    # Step 2: Create DB session
+models.Base.metadata.create_all(bind=engine)
+
+app = FastAPI()
+
+# ---------------------------------------------------------
+# CORS: Allow React Frontend
+# ---------------------------------------------------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ---------------------------------------------------------
+# DB Dependency
+# ---------------------------------------------------------
+def get_db():
     db = SessionLocal()
-
     try:
-        # Step 3: Create new Quiz entry
-        new_quiz = Quiz(
-            url=url,
-            title=title,
-            date_generated=datetime.utcnow(),
-            scraped_content=text,
-            full_quiz_data=json.dumps({"article": title, "summary": text[:500]})
-        )
-
-        # Step 4: Add and commit
-        db.add(new_quiz)
-        db.commit()
-        db.refresh(new_quiz)
-
-        print(f"✅ Successfully saved to DB with ID: {new_quiz.id}")
-
-    except Exception as e:
-        db.rollback()
-        print(f"❌ Error: {e}")
+        yield db
     finally:
         db.close()
 
-if __name__ == "__main__":
-    test_url = input("Enter Wikipedia URL: ").strip()
-    test_scrape_and_store(test_url)
+
+# ---------------------------------------------------------
+# 1) POST /generate_quiz
+# ---------------------------------------------------------
+@app.post("/generate_quiz")
+def generate_quiz_endpoint(payload: dict, db: Session = next(get_db())):
+    """
+    Accepts: { "url": "https://..." }
+    Scrapes → Generates quiz → Saves to DB → Returns JSON.
+    """
+    url = payload.get("url")
+    if not url:
+        raise HTTPException(status_code=400, detail="URL is required.")
+
+    # 1. Scrape text
+    article_text = scrape_wikipedia(url)
+    if not article_text:
+        raise HTTPException(status_code=500, detail="Failed to scrape article.")
+
+    # 2. Generate quiz
+    quiz_data = generate_quiz(article_text)
+
+    # 3. Save to database
+    quiz_record = models.Quiz(
+        url=url,
+        title=quiz_data["title"],
+        full_quiz_data=json.dumps(quiz_data),
+        date_generated=datetime.utcnow(),
+    )
+
+    db.add(quiz_record)
+    db.commit()
+    db.refresh(quiz_record)
+
+    # 4. Return full quiz JSON
+    return quiz_data
+
+
+# ---------------------------------------------------------
+# 2) GET /history
+# ---------------------------------------------------------
+@app.get("/history")
+def get_history(db: Session = next(get_db())):
+    """
+    Returns list of:
+    { id, url, title, date_generated }
+    """
+    quizzes = db.query(models.Quiz).all()
+
+    return [
+        {
+            "id": q.id,
+            "url": q.url,
+            "title": q.title,
+            "date_generated": q.date_generated,
+        }
+        for q in quizzes
+    ]
+
+
+# ---------------------------------------------------------
+# 3) GET /quiz/{quiz_id}
+# ---------------------------------------------------------
+@app.get("/quiz/{quiz_id}")
+def get_quiz(quiz_id: int, db: Session = next(get_db())):
+    """
+    Fetches quiz record by ID and returns
+    parsed JSON of full quiz data.
+    """
+    quiz = db.query(models.Quiz).filter(models.Quiz.id == quiz_id).first()
+
+    if not quiz:
+        raise HTTPException(status_code=404, detail="Quiz not found.")
+
+    # Convert JSON string → Python dict
+    return json.loads(quiz.full_quiz_data)
