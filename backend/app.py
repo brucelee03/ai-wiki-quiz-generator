@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from .database import SessionLocal, Quiz
+from database import SessionLocal, Quiz
 from scraper import scrape_wikipedia
 from datetime import datetime
 

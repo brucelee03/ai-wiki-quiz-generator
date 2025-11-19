@@ -4,12 +4,15 @@ from sqlalchemy.orm import Session
 from datetime import datetime
 import json
 
-from backend.database import SessionLocal, engine
-from backend import models
+from backend.database import engine, Base, Quiz, get_db
 from backend.scraper import scrape_wikipedia
 from backend.llm_quiz_generator import generate_quiz
+from fastapi import Depends
 
-models.Base.metadata.create_all(bind=engine)
+try:
+    Base.metadata.create_all(bind=engine)
+except Exception as e:
+    print(f"Database connection failed: {e}. Server will start without creating tables.")
 
 app = FastAPI()
 
@@ -18,7 +21,7 @@ app = FastAPI()
 # ---------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -26,21 +29,10 @@ app.add_middleware(
 
 
 # ---------------------------------------------------------
-# DB Dependency
-# ---------------------------------------------------------
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
-# ---------------------------------------------------------
 # 1) POST /generate_quiz
 # ---------------------------------------------------------
 @app.post("/generate_quiz")
-def generate_quiz_endpoint(payload: dict, db: Session = next(get_db())):
+def generate_quiz_endpoint(payload: dict, db: Session = Depends(get_db)):
     """
     Accepts: { "url": "https://..." }
     Scrapes → Generates quiz → Saves to DB → Returns JSON.
@@ -50,7 +42,7 @@ def generate_quiz_endpoint(payload: dict, db: Session = next(get_db())):
         raise HTTPException(status_code=400, detail="URL is required.")
 
     # 1. Scrape text
-    article_text = scrape_wikipedia(url)
+    title, article_text = scrape_wikipedia(url)
     if not article_text:
         raise HTTPException(status_code=500, detail="Failed to scrape article.")
 
@@ -58,10 +50,10 @@ def generate_quiz_endpoint(payload: dict, db: Session = next(get_db())):
     quiz_data = generate_quiz(article_text)
 
     # 3. Save to database
-    quiz_record = models.Quiz(
+    quiz_record = Quiz(
         url=url,
-        title=quiz_data["title"],
-        full_quiz_data=json.dumps(quiz_data),
+        title=quiz_data.title,
+        full_quiz_data=json.dumps(quiz_data.dict()),
         date_generated=datetime.utcnow(),
     )
 
@@ -70,19 +62,19 @@ def generate_quiz_endpoint(payload: dict, db: Session = next(get_db())):
     db.refresh(quiz_record)
 
     # 4. Return full quiz JSON
-    return quiz_data
+    return quiz_data.dict()
 
 
 # ---------------------------------------------------------
 # 2) GET /history
 # ---------------------------------------------------------
 @app.get("/history")
-def get_history(db: Session = next(get_db())):
+def get_history(db: Session = Depends(get_db)):
     """
     Returns list of:
     { id, url, title, date_generated }
     """
-    quizzes = db.query(models.Quiz).all()
+    quizzes = db.query(Quiz).all()
 
     return [
         {
@@ -99,15 +91,15 @@ def get_history(db: Session = next(get_db())):
 # 3) GET /quiz/{quiz_id}
 # ---------------------------------------------------------
 @app.get("/quiz/{quiz_id}")
-def get_quiz(quiz_id: int, db: Session = next(get_db())):
+def get_quiz(quiz_id: int, db: Session = Depends(get_db)):
     """
     Fetches quiz record by ID and returns
     parsed JSON of full quiz data.
     """
-    quiz = db.query(models.Quiz).filter(models.Quiz.id == quiz_id).first()
+    quiz = db.query(Quiz).filter(Quiz.id == quiz_id).first()
 
     if not quiz:
         raise HTTPException(status_code=404, detail="Quiz not found.")
 
     # Convert JSON string → Python dict
-    return json.loads(quiz.full_quiz_data)
+    return json.loads(str(quiz.full_quiz_data))

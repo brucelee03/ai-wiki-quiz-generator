@@ -41,11 +41,13 @@ parser = JsonOutputParser(pydantic_object=Quiz)
 # 3. Prompt Template (Updated)
 # -------------------------------
 
+format_instructions = parser.get_format_instructions()
+
 prompt = PromptTemplate(
     input_variables=["article_text", "num_questions"],
-    template="""
+    template=f"""
 You are an expert quiz generator.
-Read the following article and create a quiz of **at least {num_questions} questions**.
+Read the following article and create a quiz of **at least {{num_questions}} questions**.
 
 Rules:
 - Each question must be clear, factual, and high-quality.
@@ -58,9 +60,8 @@ JSON FORMAT:
 {format_instructions}
 
 ARTICLE:
-{article_text}
-""",
-    partial_variables={"format_instructions": parser.get_format_instructions()}
+{{article_text}}
+"""
 )
 
 
@@ -68,7 +69,7 @@ ARTICLE:
 # 4. Quiz Generator Function
 # -------------------------------
 
-def generate_quiz(article_text: str, num_questions: int = 5) -> dict:
+def generate_quiz(article_text: str, num_questions: int = 5) -> Quiz:
     chain = prompt | llm | parser
     result = chain.invoke({
         "article_text": article_text,
